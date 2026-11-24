@@ -461,6 +461,15 @@ function toLocalDateStr(ms) {
   return `${y}-${m}-${day}`;
 }
 
+function toLocalHourKey(ms) {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  return `${y}-${m}-${day}T${hh}`;
+}
+
 // NOTE (verified on 42,393 / 42,393 records with field #10, 100% zero exceptions):
 // outTok MUST be the raw usage field #3 (total output), which already includes
 // reasoning/thinking tokens (field #9), and field #10 (visible text) === field #3 - field #9.
@@ -791,6 +800,7 @@ export function getAggregatedStats(params = {}) {
 
   const modelTotals = {};
   const dailyBuckets = {};
+  const hourlyBuckets = {};
   const heatMapData = {};
 
   if (!isEmptyTest && convsDir && existsSync(convsDir)) {
@@ -1016,6 +1026,17 @@ export function getAggregatedStats(params = {}) {
               dailyBuckets[dateStr].pricedSteps += 1;
             }
             dailyBuckets[dateStr].messages += 1;
+
+            const hourKey = toLocalHourKey(stepTime);
+            if (!hourlyBuckets[hourKey]) {
+              hourlyBuckets[hourKey] = { tokens: 0, costUsd: 0, pricedSteps: 0, steps: 0, toolCalls: 0, messages: 0 };
+            }
+            hourlyBuckets[hourKey].tokens += stepTotal;
+            if (isStepPriced) {
+              hourlyBuckets[hourKey].costUsd += stepCostDetail.costUsd;
+              hourlyBuckets[hourKey].pricedSteps += 1;
+            }
+            hourlyBuckets[hourKey].messages += 1;
           }
         }
 
@@ -1027,6 +1048,13 @@ export function getAggregatedStats(params = {}) {
           }
           dailyBuckets[dateStr].steps += 1;
           if (r.stepType === 132) dailyBuckets[dateStr].toolCalls += 1;
+
+          const hourKey = toLocalHourKey(stepTime);
+          if (!hourlyBuckets[hourKey]) {
+            hourlyBuckets[hourKey] = { tokens: 0, costUsd: 0, pricedSteps: 0, steps: 0, toolCalls: 0, messages: 0 };
+          }
+          hourlyBuckets[hourKey].steps += 1;
+          if (r.stepType === 132) hourlyBuckets[hourKey].toolCalls += 1;
         }
 
         // Mutually exclusive & exhaustive 3-slice timing breakdown within active turn windows:
@@ -1235,43 +1263,95 @@ export function getAggregatedStats(params = {}) {
     ? parseFloat(((grandPricedTokens / grandTotalTokens) * 100).toFixed(1))
     : 0;
 
-  // Continuous calendar date sequence aligned with selected range (zero-filled on inactive days)
-  const spanDays = range === '30d' ? 30 : (range === '7d' || range === '24h' ? 7 : 14);
+  // Continuous timeline: 25-point hourly rolling trend for '24h', daily calendar sequence otherwise
+  const timelineGranularity = range === '24h' ? 'hour' : 'day';
   const timeline = [];
   if (!isEmptyTest) {
-    const endDay = new Date(now);
-    endDay.setHours(0, 0, 0, 0);
-    for (let i = spanDays - 1; i >= 0; i--) {
-      const dObj = new Date(endDay.getTime() - i * 24 * 3600 * 1000);
-      const date = toLocalDateStr(dObj.getTime());
-      const d = dailyBuckets[date];
-      if (d) {
-        const isDayPriced = d.pricedSteps > 0 || d.messages === 0;
-        timeline.push({
-          date: date.slice(5),
-          fullDate: date,
-          tokens: d.tokens,
-          priced: isDayPriced,
-          costUsd: isDayPriced ? parseFloat(d.costUsd.toFixed(2)) : null,
-          cost: isDayPriced ? parseFloat((d.costUsd * USD_CNY_RATE).toFixed(2)) : null,
-          costDisplay: isDayPriced ? `$${d.costUsd.toFixed(2)}` : '—',
-          steps: d.steps,
-          messages: d.messages,
-          toolCalls: d.toolCalls,
-        });
-      } else {
-        timeline.push({
-          date: date.slice(5),
-          fullDate: date,
-          tokens: 0,
-          priced: true,
-          costUsd: 0,
-          cost: 0,
-          costDisplay: '$0.00',
-          steps: 0,
-          messages: 0,
-          toolCalls: 0,
-        });
+    if (timelineGranularity === 'hour') {
+      const endHour = new Date(now);
+      endHour.setMinutes(0, 0, 0);
+      for (let i = 24; i >= 0; i--) {
+        const hStart = new Date(endHour.getTime() - i * 3600 * 1000);
+        const hEnd = new Date(hStart.getTime() + 3600 * 1000);
+        const hourKey = toLocalHourKey(hStart.getTime());
+        const fullDate = toLocalDateStr(hStart.getTime());
+        const hh = String(hStart.getHours()).padStart(2, '0');
+        const hhNext = String(hEnd.getHours()).padStart(2, '0');
+        const timeRange = `${fullDate.slice(5)} ${hh}:00 - ${hhNext}:00`;
+        const h = hourlyBuckets[hourKey];
+        if (h) {
+          const isHourPriced = h.pricedSteps > 0 || h.messages === 0;
+          timeline.push({
+            granularity: 'hour',
+            hourKey,
+            date: `${hh}:00`,
+            timeRange,
+            fullDate,
+            tokens: h.tokens,
+            priced: isHourPriced,
+            costUsd: isHourPriced ? parseFloat(h.costUsd.toFixed(2)) : null,
+            cost: isHourPriced ? parseFloat((h.costUsd * USD_CNY_RATE).toFixed(2)) : null,
+            costDisplay: isHourPriced ? `$${h.costUsd.toFixed(2)}` : '—',
+            steps: h.steps,
+            messages: h.messages,
+            toolCalls: h.toolCalls,
+          });
+        } else {
+          timeline.push({
+            granularity: 'hour',
+            hourKey,
+            date: `${hh}:00`,
+            timeRange,
+            fullDate,
+            tokens: 0,
+            priced: true,
+            costUsd: 0,
+            cost: 0,
+            costDisplay: '$0.00',
+            steps: 0,
+            messages: 0,
+            toolCalls: 0,
+          });
+        }
+      }
+    } else {
+      const spanDays = range === '30d' ? 30 : (range === '7d' ? 7 : 14);
+      const endDay = new Date(now);
+      endDay.setHours(0, 0, 0, 0);
+      for (let i = spanDays - 1; i >= 0; i--) {
+        const dObj = new Date(endDay.getTime() - i * 24 * 3600 * 1000);
+        const date = toLocalDateStr(dObj.getTime());
+        const d = dailyBuckets[date];
+        if (d) {
+          const isDayPriced = d.pricedSteps > 0 || d.messages === 0;
+          timeline.push({
+            granularity: 'day',
+            date: date.slice(5),
+            fullDate: date,
+            tokens: d.tokens,
+            priced: isDayPriced,
+            costUsd: isDayPriced ? parseFloat(d.costUsd.toFixed(2)) : null,
+            cost: isDayPriced ? parseFloat((d.costUsd * USD_CNY_RATE).toFixed(2)) : null,
+            costDisplay: isDayPriced ? `$${d.costUsd.toFixed(2)}` : '—',
+            steps: d.steps,
+            messages: d.messages,
+            toolCalls: d.toolCalls,
+          });
+        } else {
+          timeline.push({
+            granularity: 'day',
+            date: date.slice(5),
+            fullDate: date,
+            tokens: 0,
+            priced: true,
+            costUsd: 0,
+            cost: 0,
+            costDisplay: '$0.00',
+            steps: 0,
+            messages: 0,
+            toolCalls: 0,
+          });
+        }
       }
     }
   }
@@ -1384,6 +1464,7 @@ export function getAggregatedStats(params = {}) {
       },
     },
     timeline,
+    timelineGranularity,
     tokenCategories,
     modelCategories,
     timeCategories,

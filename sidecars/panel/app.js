@@ -475,17 +475,252 @@ function renderDonutChart(svgId, centerId, legendId, centerText, categories) {
   });
 }
 
-// Render Dual Bar Chart (Token + Cost) with Peak Scale & Floating Tooltip
+function buildSmoothPath(points, topY, baselineY) {
+  const n = points.length;
+  if (n === 0) return '';
+  if (n === 1) return `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+  if (n === 2) {
+    return `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)} L ${points[1].x.toFixed(1)} ${points[1].y.toFixed(1)}`;
+  }
+
+  const d = new Array(n - 1);
+  for (let i = 0; i < n - 1; i++) {
+    const dx = points[i + 1].x - points[i].x;
+    d[i] = dx > 0 ? (points[i + 1].y - points[i].y) / dx : 0;
+  }
+
+  const m = new Array(n);
+  m[0] = d[0];
+  m[n - 1] = d[n - 2];
+  for (let i = 1; i < n - 1; i++) {
+    m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2;
+  }
+
+  for (let i = 0; i < n - 1; i++) {
+    if (d[i] === 0) {
+      m[i] = 0;
+      m[i + 1] = 0;
+    } else {
+      const a = m[i] / d[i];
+      const b = m[i + 1] / d[i];
+      const s = a * a + b * b;
+      if (s > 9) {
+        const t = 3 / Math.sqrt(s);
+        m[i] = t * a * d[i];
+        m[i + 1] = t * b * d[i];
+      }
+    }
+  }
+
+  const clampY = (y) => Math.max(topY, Math.min(baselineY, y));
+  let path = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = points[i];
+    const p1 = points[i + 1];
+    const dx = (p1.x - p0.x) / 3;
+    const cp1x = (p0.x + dx).toFixed(1);
+    const cp1y = clampY(p0.y + m[i] * dx).toFixed(1);
+    const cp2x = (p1.x - dx).toFixed(1);
+    const cp2y = clampY(p1.y - m[i + 1] * dx).toFixed(1);
+    path += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
+  }
+  return path;
+}
+
+function buildAreaPath(linePath, points, baselineY) {
+  if (!linePath || points.length === 0) return '';
+  const first = points[0];
+  const last = points[points.length - 1];
+  return `${linePath} L ${last.x.toFixed(1)} ${baselineY.toFixed(1)} L ${first.x.toFixed(1)} ${baselineY.toFixed(1)} Z`;
+}
+
+function renderHourlyLineChart(container, peakScaleEl, timeline) {
+  container.classList.add('line-chart-mode');
+
+  const rawMaxTokens = Math.max(...timeline.map((t) => t.tokens || 0), 0);
+  const rawMaxCost = Math.max(...timeline.map((t) => t.costUsd || t.cost || 0), 0);
+  if (peakScaleEl) {
+    peakScaleEl.innerHTML = (rawMaxTokens > 0 || rawMaxCost > 0)
+      ? `<span>小时峰值 Token: <strong>${escapeHtml(formatTokens(rawMaxTokens))}</strong></span><span>小时峰值费用: <strong>$${rawMaxCost.toFixed(2)}</strong></span>`
+      : '<span>近 24 小时暂无活跃用量</span>';
+  }
+
+  const svgW = Math.max(280, Math.floor(container.clientWidth) || 440);
+  const svgH = 198;
+  const padLeft = 44;
+  const padRight = 12;
+  const padTop = 14;
+  const padBottom = 26;
+  const plotW = Math.max(120, svgW - padLeft - padRight);
+  const plotH = svgH - padTop - padBottom;
+  const baselineY = padTop + plotH;
+
+  const maxTokens = Math.max(rawMaxTokens, 1000);
+  const maxCost = Math.max(rawMaxCost, 0.1);
+  const denomIdx = Math.max(1, timeline.length - 1);
+
+  const tokenPoints = timeline.map((item, idx) => {
+    const x = padLeft + (idx / denomIdx) * plotW;
+    const ratio = rawMaxTokens > 0 ? Math.min(1, (item.tokens || 0) / maxTokens) : 0;
+    const y = baselineY - ratio * plotH;
+    return { x, y };
+  });
+
+  const costPoints = timeline.map((item, idx) => {
+    const x = padLeft + (idx / denomIdx) * plotW;
+    const costVal = item.costUsd || item.cost || 0;
+    const ratio = rawMaxCost > 0 ? Math.min(1, costVal / maxCost) : 0;
+    const y = baselineY - ratio * plotH;
+    return { x, y };
+  });
+
+  const tokenPath = buildSmoothPath(tokenPoints, padTop, baselineY);
+  const areaPath = buildAreaPath(tokenPath, tokenPoints, baselineY);
+  const costPath = buildSmoothPath(costPoints, padTop, baselineY);
+
+  const yLevels = [
+    { ratio: 0, label: '0', isBase: true },
+    { ratio: 0.5, label: rawMaxTokens > 0 ? formatTokensCompact(maxTokens * 0.5) : '' },
+    { ratio: 1, label: rawMaxTokens > 0 ? formatTokensCompact(maxTokens) : '' },
+  ];
+
+  const yGridSvg = yLevels.map((lv) => {
+    const y = (baselineY - lv.ratio * plotH).toFixed(1);
+    const lineCls = lv.isBase ? 'line-axis-baseline' : 'line-grid';
+    const labelHtml = lv.label
+      ? `<text class="line-axis-text" x="${padLeft - 6}" y="${(Number(y) + 3).toFixed(1)}" text-anchor="end">${escapeHtml(lv.label)}</text>`
+      : '';
+    return `<line class="${lineCls}" x1="${padLeft}" y1="${y}" x2="${svgW - padRight}" y2="${y}"/>${labelHtml}`;
+  }).join('');
+
+  const tickStep = svgW < 340 ? 6 : 4;
+  const xTicksSvg = timeline.map((item, idx) => {
+    if (idx % tickStep !== 0 && idx !== timeline.length - 1) return '';
+    const x = tokenPoints[idx].x.toFixed(1);
+    const anchor = idx === 0 ? 'start' : (idx === timeline.length - 1 ? 'end' : 'middle');
+    return `
+      <line class="line-grid" stroke-opacity="0.45" x1="${x}" y1="${padTop}" x2="${x}" y2="${baselineY}"/>
+      <text class="line-axis-text" x="${x}" y="${svgH - 6}" text-anchor="${anchor}">${escapeHtml(item.date)}</text>
+    `;
+  }).join('');
+
+  const dotsSvg = timeline.map((item, idx) => {
+    if (!(item.tokens > 0)) return '';
+    const pt = tokenPoints[idx];
+    return `<circle class="line-dot" cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="2.4"/>`;
+  }).join('');
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'line-chart-svg');
+  svg.setAttribute('viewBox', `0 0 ${svgW} ${svgH}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.innerHTML = `
+    <defs>
+      <linearGradient id="tokenAreaGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="var(--primary-color)" stop-opacity="0.28"/>
+        <stop offset="100%" stop-color="var(--primary-color)" stop-opacity="0.02"/>
+      </linearGradient>
+    </defs>
+    ${yGridSvg}
+    ${xTicksSvg}
+    <path d="${areaPath}" fill="url(#tokenAreaGrad)"/>
+    <path class="line-cost-path" d="${costPath}"/>
+    <path class="line-token-path" d="${tokenPath}"/>
+    ${dotsSvg}
+    <line class="line-crosshair" id="lineCrosshair" x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${baselineY}" style="display:none;"/>
+    <circle class="line-dot-active" id="lineActiveCostDot" cx="0" cy="0" r="3.5" fill="var(--success-color)" style="display:none;"/>
+    <circle class="line-dot-active" id="lineActiveTokenDot" cx="0" cy="0" r="4" fill="var(--primary-color)" style="display:none;"/>
+    <rect id="lineHoverOverlay" x="${padLeft}" y="${padTop}" width="${plotW}" height="${plotH}" fill="transparent" style="cursor:crosshair;"/>
+  `;
+  container.appendChild(svg);
+
+  const overlay = svg.querySelector('#lineHoverOverlay');
+  const crosshair = svg.querySelector('#lineCrosshair');
+  const activeTokenDot = svg.querySelector('#lineActiveTokenDot');
+  const activeCostDot = svg.querySelector('#lineActiveCostDot');
+  let hoveredIdx = -1;
+
+  const snapIndex = (e) => {
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width) return 0;
+    const relX = ((e.clientX - rect.left) / rect.width) * svgW;
+    const ratio = Math.max(0, Math.min(1, (relX - padLeft) / plotW));
+    return Math.max(0, Math.min(timeline.length - 1, Math.round(ratio * denomIdx)));
+  };
+
+  overlay.addEventListener('mousemove', (e) => {
+    const idx = snapIndex(e);
+    hoveredIdx = idx;
+    const item = timeline[idx];
+    const tp = tokenPoints[idx];
+    const cp = costPoints[idx];
+
+    crosshair.setAttribute('x1', tp.x.toFixed(1));
+    crosshair.setAttribute('x2', tp.x.toFixed(1));
+    crosshair.style.display = '';
+
+    activeTokenDot.setAttribute('cx', tp.x.toFixed(1));
+    activeTokenDot.setAttribute('cy', tp.y.toFixed(1));
+    activeTokenDot.style.display = '';
+
+    activeCostDot.setAttribute('cx', cp.x.toFixed(1));
+    activeCostDot.setAttribute('cy', cp.y.toFixed(1));
+    activeCostDot.style.display = '';
+
+    const costTooltip = item.priced === false ? '—' : `$${item.costUsd} (¥${item.cost})`;
+    const hintText = item.steps > 0 ? '点击按该日期筛选会话' : '该时段无活跃记录';
+    const tooltipContent = `
+      <div class="tip-title">${escapeHtml(item.timeRange || item.date)}</div>
+      <div class="tip-row">
+        <span class="tip-muted">该小时 Token:</span>
+        <span class="tip-accent-blue">${escapeHtml(formatTokens(item.tokens))}</span>
+      </div>
+      <div class="tip-row">
+        <span class="tip-muted">API 等效估算:</span>
+        <span class="tip-accent-green">${escapeHtml(costTooltip)}</span>
+      </div>
+      <div class="tip-sub">
+        模型响应: ${item.messages || 0} 次 · 步数: ${item.steps} 步 · 工具: ${item.toolCalls} 次
+      </div>
+      <div class="tip-hint">${hintText}</div>
+    `;
+    showFloatingTooltip(e, tooltipContent);
+  });
+
+  overlay.addEventListener('mouseleave', () => {
+    hoveredIdx = -1;
+    crosshair.style.display = 'none';
+    activeTokenDot.style.display = 'none';
+    activeCostDot.style.display = 'none';
+    hideFloatingTooltip();
+  });
+
+  overlay.addEventListener('click', () => {
+    if (hoveredIdx >= 0 && timeline[hoveredIdx] && timeline[hoveredIdx].steps > 0) {
+      toggleDateFilter(timeline[hoveredIdx].fullDate);
+    }
+  });
+}
+
+// Render Dual Bar Chart (Token + Cost) or 24h Hourly SVG Line Chart
 function renderBarChart(timeline) {
   const container = document.getElementById('barChartContainer');
   const peakScaleEl = document.getElementById('barChartPeakScale');
   container.innerHTML = '';
 
   if (!timeline || timeline.length === 0) {
+    container.classList.remove('line-chart-mode');
     if (peakScaleEl) peakScaleEl.innerHTML = '';
     container.innerHTML = '<div style="color:var(--text-muted); font-size:12px; margin:auto;">暂无近期活跃记录</div>';
     return;
   }
+
+  if (timeline[0]?.granularity === 'hour') {
+    renderHourlyLineChart(container, peakScaleEl, timeline);
+    return;
+  }
+
+  container.classList.remove('line-chart-mode');
 
   const rawMaxTokens = Math.max(...timeline.map((t) => t.tokens || 0), 0);
   const rawMaxCost = Math.max(...timeline.map((t) => t.costUsd || t.cost || 0), 0);
@@ -1134,6 +1369,24 @@ document.addEventListener('DOMContentLoaded', () => {
       location.reload();
     }
   });
+
+  // Redraw 24h line chart smoothly when sidecar container resizes
+  const barChartEl = document.getElementById('barChartContainer');
+  if (barChartEl && typeof ResizeObserver === 'function') {
+    let lastChartW = barChartEl.clientWidth || 0;
+    let resizeRaf = null;
+    const ro = new ResizeObserver((entries) => {
+      const w = Math.floor(entries[0]?.contentRect?.width || 0);
+      if (Math.abs(w - lastChartW) < 8) return;
+      lastChartW = w;
+      if (!cachedData || !cachedData.timeline || cachedData.timeline[0]?.granularity !== 'hour') return;
+      if (resizeRaf) cancelAnimationFrame(resizeRaf);
+      resizeRaf = requestAnimationFrame(() => {
+        renderBarChart(cachedData.timeline);
+      });
+    });
+    ro.observe(barChartEl);
+  }
 
   // Initial load
   fetchStats();
