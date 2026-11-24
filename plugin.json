@@ -1,0 +1,7 @@
+{
+  "name": "context-insights",
+  "displayName": "上下文洞察",
+  "version": "1.0.0",
+  "description": "全功能 Token 统计与上下文洞察面板：实时查看活跃会话、累计 Token 消耗、缓存命中率、耗时分析、活跃度热力图与会话透视。",
+  "logo": "assets/logo.svg"
+}

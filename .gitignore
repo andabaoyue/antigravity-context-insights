@@ -1,0 +1,13 @@
+# Legacy backups & archive snapshots
+sidecars/panel/_archive/
+*.bak
+*.log
+
+# Node dependencies & runtime caches
+node_modules/
+pricing_cache.json
+
+# OS / Editor artifacts
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,7 @@
+{
+  "name": "context-insights-panel",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Auxiliary UI pane for Antigravity Context Insights and Token Tracking."
+}
